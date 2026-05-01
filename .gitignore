@@ -1,0 +1,22 @@
+# Local-only spec and the bundled ffmpeg binary
+SPEC.txt
+ffmpeg.exe
+ffmpeg
+
+# PyInstaller build artefacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

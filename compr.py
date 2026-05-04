@@ -196,27 +196,36 @@ def _run_ffmpeg(args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def probe_duration(path: Path, timeout: float = 30.0) -> float | None:
-    """Stream ffmpeg stderr and kill the process the moment Duration appears.
+def probe_duration(path: Path, timeout: float = 30.0) -> tuple[float | None, str]:
+    """Return (duration_seconds_or_None, reason_string).
 
-    Faster than waiting for ffmpeg to exit on slow / network storage, where the
-    full stream-scan can take many seconds even though the duration is printed
-    within the first second.
+    Streams ffmpeg stderr and kills the process as soon as Duration appears.
+    On failure, returns a short reason so the GUI can surface it instead of
+    a silent 'unknown'.
     """
+    if not FFMPEG.exists():
+        return None, f"ffmpeg not found at {FFMPEG}"
+    if not Path(path).exists():
+        return None, "file does not exist"
+
     args = [str(FFMPEG), "-hide_banner", "-i", str(path)]
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             text=True, bufsize=1, creationflags=CREATE_NO_WINDOW,
         )
-    except OSError:
-        return None
+    except OSError as e:
+        return None, f"ffmpeg launch failed: {e}"
 
     duration: float | None = None
+    tail: list[str] = []
     deadline = time.monotonic() + timeout
     try:
         assert proc.stderr is not None
         for line in proc.stderr:
+            tail.append(line)
+            if len(tail) > 30:
+                tail.pop(0)
             m = DUR_RE.search(line)
             if m:
                 duration = (int(m.group(1)) * 3600
@@ -234,7 +243,12 @@ def probe_duration(path: Path, timeout: float = 30.0) -> float | None:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-    return duration
+
+    if duration is not None:
+        return duration, ""
+    if time.monotonic() > deadline:
+        return None, "probe timed out (30s)"
+    return None, "Duration not found in ffmpeg output: " + "".join(tail[-5:]).strip()[:200]
 
 
 def encode_clip(src: Path, start: float, length: float, dst: Path,
@@ -525,7 +539,8 @@ class App:
         threading.Thread(target=self._probe_thread, args=(p,), daemon=True).start()
 
     def _probe_thread(self, p: Path) -> None:
-        self.msg_q.put(("duration", probe_duration(p)))
+        dur, reason = probe_duration(p)
+        self.msg_q.put(("duration", dur, reason))
 
     def _on_output_toggle(self) -> None:
         if self.individual_var.get():
@@ -775,8 +790,12 @@ class App:
         kind = msg[0]
         if kind == "duration":
             dur = msg[1]
+            reason = msg[2] if len(msg) > 2 else ""
             self.video_duration = dur
-            self.dur_var.set("duration unknown" if dur is None else f"duration {fmt_hms(dur)}")
+            if dur is None:
+                self.dur_var.set(f"duration unknown — {reason}" if reason else "duration unknown")
+            else:
+                self.dur_var.set(f"duration {fmt_hms(dur)}")
             self._refresh_state()
         elif kind == "status":
             self.status_var.set(msg[1])

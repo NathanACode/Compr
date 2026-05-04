@@ -748,7 +748,8 @@ class App:
                     for i, p in enumerate(produced, 1):
                         self.msg_q.put(("status",
                             f"Fading {i}/{len(produced)} for compilation…"))
-                        d = probe_duration(p) or length
+                        pd, _ = probe_duration(p)
+                        d = pd if pd is not None else length
                         fp = fade_dir / p.name
                         ok, err = encode_with_fade(p, fp, d, keep_audio=keep_audio)
                         if not ok:

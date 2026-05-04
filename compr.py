@@ -138,8 +138,8 @@ class Group:
         return self.events[-1]
 
 
-def group_events(events: list[Event], clip_length: float) -> list[Group]:
-    """Greedy chain merge: consecutive events in the same half, gap <= clip_length."""
+def group_events(events: list[Event], merge_threshold: float) -> list[Group]:
+    """Greedy chain merge: consecutive events in the same half, gap <= merge_threshold."""
     groups: list[Group] = []
     cur: Group | None = None
     for i, e in enumerate(events, 1):
@@ -147,7 +147,7 @@ def group_events(events: list[Event], clip_length: float) -> list[Group]:
             cur = Group(indices=[i], events=[e])
             continue
         prev = cur.events[-1]
-        if prev.half == e.half and (e.offset - prev.offset) <= clip_length:
+        if prev.half == e.half and (e.offset - prev.offset) <= merge_threshold:
             cur.indices.append(i)
             cur.events.append(e)
         else:
@@ -173,10 +173,10 @@ def group_filename(g: Group) -> str:
     return f"{idx_str}_{label_str}_{g.first.half}_{tc}.mp4"
 
 
-def group_window(g: Group, clip_length: float, duration: float) -> tuple[float, float]:
-    half = clip_length / 2
-    start = max(0.0, g.first.offset - half)
-    end = min(duration, g.last.offset + half)
+def group_window(g: Group, pre: float, post: float,
+                 duration: float) -> tuple[float, float]:
+    start = max(0.0, g.first.offset - pre)
+    end = min(duration, g.last.offset + post)
     return start, max(0.1, end - start)
 
 
@@ -451,18 +451,25 @@ class App:
         sb.pack(side="right", fill="y")
         self.preview.config(yscrollcommand=sb.set)
 
-        # 5. clip length + audio
+        # 5. pre/post clip length + audio
         row5 = ttk.Frame(wrap); row5.pack(fill="x", pady=(2, 8))
-        ttk.Label(row5, text="Clip length (s)").pack(side="left")
-        self.len_var = IntVar(value=20)
-        self.len_spin = ttk.Spinbox(row5, from_=2, to=120, increment=1, width=6,
-                                    textvariable=self.len_var,
+        ttk.Label(row5, text="Before event (s)").pack(side="left")
+        self.pre_var = IntVar(value=10)
+        self.pre_spin = ttk.Spinbox(row5, from_=1, to=60, increment=1, width=5,
+                                    textvariable=self.pre_var,
                                     command=self._refresh_state)
-        self.len_spin.pack(side="left", padx=8)
-        self.len_var.trace_add("write", lambda *_: self._refresh_state())
-        self.audio_var = BooleanVar(value=True)
+        self.pre_spin.pack(side="left", padx=(6, 14))
+        self.pre_var.trace_add("write", lambda *_: self._refresh_state())
+        ttk.Label(row5, text="After event (s)").pack(side="left")
+        self.post_var = IntVar(value=10)
+        self.post_spin = ttk.Spinbox(row5, from_=1, to=60, increment=1, width=5,
+                                     textvariable=self.post_var,
+                                     command=self._refresh_state)
+        self.post_spin.pack(side="left", padx=(6, 18))
+        self.post_var.trace_add("write", lambda *_: self._refresh_state())
+        self.audio_var = BooleanVar(value=False)
         ttk.Checkbutton(row5, text="Include audio",
-                        variable=self.audio_var).pack(side="left", padx=20)
+                        variable=self.audio_var).pack(side="left", padx=10)
 
         # 6. output checkboxes
         ttk.Label(wrap, text="Output", style="Header.TLabel").pack(anchor="w")
@@ -500,7 +507,7 @@ class App:
         ttk.Label(cmp_row, textvariable=self.cmp_path_var,
                   style="Muted.TLabel").pack(side="left", padx=10)
         cmp_row2 = ttk.Frame(self.cmp_frame); cmp_row2.pack(fill="x", pady=(0, 6))
-        self.fade_var = BooleanVar(value=False)
+        self.fade_var = BooleanVar(value=True)
         ttk.Checkbutton(cmp_row2,
                         text="Fade to/from black between clips (0.5s)",
                         variable=self.fade_var).pack(side="left")
@@ -591,9 +598,11 @@ class App:
         self.kick_err.set(kick_msg)
 
         try:
-            length = int(self.len_var.get())
+            pre = int(self.pre_var.get())
+            post = int(self.post_var.get())
         except Exception:
-            length = 0
+            pre = post = 0
+        length = pre + post
 
         blob = self.events_text.get("1.0", END)
         self.events, self.parse_errors = parse_events(blob)
@@ -618,7 +627,7 @@ class App:
             and self.video_duration is not None
             and h1 is not None and h2 is not None and h2 > h1
             and self.events and not self.parse_errors
-            and 2 <= length <= 120
+            and 1 <= pre <= 60 and 1 <= post <= 60
             and any_output and ind_ok and cmp_ok
             and (self.worker is None or not self.worker.is_alive())
         )
@@ -660,7 +669,11 @@ class App:
             messagebox.showerror("Compr", f"ffmpeg not found at {FFMPEG}")
             return
 
-        length = int(self.len_var.get())
+        pre = int(self.pre_var.get())
+        post = int(self.post_var.get())
+        if not (1 <= pre <= 60 and 1 <= post <= 60):
+            messagebox.showerror("Compr", "Before/after must each be 1–60 seconds.")
+            return
         do_ind = self.individual_var.get()
         do_cmp = self.compiled_var.get()
 
@@ -691,14 +704,14 @@ class App:
         self.worker = threading.Thread(
             target=self._worker_run,
             args=(self.video_path, list(self.groups), self.video_duration,
-                  float(length), do_ind, ind_dir, do_cmp, self.compiled_path,
-                  do_fade, keep_audio),
+                  float(pre), float(post), do_ind, ind_dir, do_cmp,
+                  self.compiled_path, do_fade, keep_audio),
             daemon=True,
         )
         self.worker.start()
 
     def _worker_run(self, src: Path, groups: list[Group], duration: float,
-                    length: float, do_ind: bool, ind_dir: Path | None,
+                    pre: float, post: float, do_ind: bool, ind_dir: Path | None,
                     do_cmp: bool, cmp_path: Path | None, do_fade: bool,
                     keep_audio: bool) -> None:
         try:
@@ -716,7 +729,7 @@ class App:
             recent: deque[float] = deque(maxlen=5)
 
             for i, g in enumerate(groups, 1):
-                start, seg = group_window(g, length, duration)
+                start, seg = group_window(g, pre, post, duration)
                 fname = group_filename(g)
                 dst = clip_dir / fname
 
@@ -749,7 +762,7 @@ class App:
                         self.msg_q.put(("status",
                             f"Fading {i}/{len(produced)} for compilation…"))
                         pd, _ = probe_duration(p)
-                        d = pd if pd is not None else length
+                        d = pd if pd is not None else (pre + post)
                         fp = fade_dir / p.name
                         ok, err = encode_with_fade(p, fp, d, keep_audio=keep_audio)
                         if not ok:
@@ -815,7 +828,7 @@ class App:
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
         state = "!disabled" if enabled else "disabled"
-        for w in (self.h1_entry, self.h2_entry, self.len_spin,
+        for w in (self.h1_entry, self.h2_entry, self.pre_spin, self.post_spin,
                   self.ind_name_entry):
             try:
                 w.state([state])

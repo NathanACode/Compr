@@ -196,13 +196,45 @@ def _run_ffmpeg(args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def probe_duration(path: Path) -> float | None:
-    cp = _run_ffmpeg(["-i", str(path)])
-    text = (cp.stderr or "") + (cp.stdout or "")
-    m = DUR_RE.search(text)
-    if not m:
+def probe_duration(path: Path, timeout: float = 30.0) -> float | None:
+    """Stream ffmpeg stderr and kill the process the moment Duration appears.
+
+    Faster than waiting for ffmpeg to exit on slow / network storage, where the
+    full stream-scan can take many seconds even though the duration is printed
+    within the first second.
+    """
+    args = [str(FFMPEG), "-hide_banner", "-i", str(path)]
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, bufsize=1, creationflags=CREATE_NO_WINDOW,
+        )
+    except OSError:
         return None
-    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+    duration: float | None = None
+    deadline = time.monotonic() + timeout
+    try:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            m = DUR_RE.search(line)
+            if m:
+                duration = (int(m.group(1)) * 3600
+                            + int(m.group(2)) * 60
+                            + float(m.group(3)))
+                break
+            if time.monotonic() > deadline:
+                break
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    return duration
 
 
 def encode_clip(src: Path, start: float, length: float, dst: Path,
